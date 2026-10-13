@@ -1,0 +1,8 @@
+[package]
+name = "dankmon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libc = "0.2.190"
+ratatui = "0.30.2"

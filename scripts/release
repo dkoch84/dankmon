@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Build the dankmon package and, optionally, publish it to a pacman repo.
+#
+# Usage: scripts/release [--bump-rel] [--repo DIR]
+#   --bump-rel  increment pkgrel in the PKGBUILD before building
+#   --repo DIR  publish into the pacman repo directory DIR
+#
+# The source is archived from the WORKING TREE (via `git stash create`), not
+# from HEAD, so uncommitted work is what ships (untracked files do not:
+# stage new ones first); `git archive` also keeps the built binary out.
+#
+# Publishing is optional. Point it at a pacman repo directory with --repo, with
+# DANKMON_PACMAN_REPO, or from pkg/arch/release.local (untracked; see
+# release.local.example). With none set, the package is left in pkg/arch/dankmon/ for
+# pacman -U.
+set -euo pipefail
+
+PROJ="$(cd "$(dirname "$0")/.." && pwd)"
+DIR="$PROJ/pkg/arch/dankmon"
+
+# The environment wins over release.local, so an explicit DANKMON_PACMAN_REPO on
+# the command line can never be overridden into publishing to the real repo.
+env_repo="${DANKMON_PACMAN_REPO:-}"
+env_db="${DANKMON_PACMAN_DB:-}"
+# shellcheck source=/dev/null
+[ -f "$PROJ/pkg/arch/release.local" ] && source "$PROJ/pkg/arch/release.local"
+[ -n "$env_repo" ] && DANKMON_PACMAN_REPO="$env_repo"
+[ -n "$env_db" ] && DANKMON_PACMAN_DB="$env_db"
+
+bump_rel=0
+repo_dir="${DANKMON_PACMAN_REPO:-}"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --bump-rel) bump_rel=1 ;;
+        --repo) shift; repo_dir="${1:-}" ;;
+        *) echo "usage: scripts/release [--bump-rel] [--repo DIR]" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# A repo's database is named after the repo, so there is no sensible default:
+# take it from the environment, or infer it when the directory holds one.
+resolve_db() {
+    local dir="$1" found
+    if [ -n "${DANKMON_PACMAN_DB:-}" ]; then
+        echo "$DANKMON_PACMAN_DB"
+        return 0
+    fi
+    mapfile -t found < <(find "$dir" -maxdepth 1 -name '*.db.tar.*' ! -name '*.old' -printf '%f\n' 2>/dev/null)
+    if [ "${#found[@]}" = 1 ]; then
+        echo "${found[0]}"
+        return 0
+    fi
+    echo "cannot tell which database to index in $dir; set DANKMON_PACMAN_DB" >&2
+    return 1
+}
+
+# The repo directory is served live, so every intermediate state must be one
+# a client survives: land the bytes under a dot-name and rename into place
+# (pacman never requests a file the database does not name), add and index
+# before deleting the previous build, and delete by "everything but what was
+# just added". The [0-9] keeps dankmon-* from matching another dankmon-something.
+part=""
+cleanup() { [ -n "$part" ] && rm -f "$part"; return 0; }
+trap cleanup EXIT
+trap 'cleanup; trap - INT;  kill -INT  $$' INT
+trap 'cleanup; trap - TERM; kill -TERM $$' TERM
+
+publish() {
+    local built="$1" base db
+    db=$(resolve_db "$repo_dir") || return 1
+    base=$(basename "$built")
+    # An interrupted copy strands a dot-file nothing names: sweep it.
+    rm -f "$repo_dir"/.*.part 2>/dev/null || true
+    part="$repo_dir/.$base.part"
+    cp "$built" "$part"
+    mv "$part" "$repo_dir/$base"
+    part=""
+    repo-add "$repo_dir/$db" "$repo_dir/$base"
+    find "$repo_dir" -maxdepth 1 -name "dankmon-[0-9]*.pkg.tar*" ! -name "$base*" -delete
+    echo "==> published $base"
+}
+
+cd "$DIR"
+if [ "$bump_rel" = 1 ]; then
+    rel=$(grep '^pkgrel=' PKGBUILD | cut -d= -f2)
+    sed -i "s/^pkgrel=.*/pkgrel=$((rel + 1))/" PKGBUILD
+fi
+ver=$(grep '^pkgver=' PKGBUILD | cut -d= -f2)
+rel=$(grep '^pkgrel=' PKGBUILD | cut -d= -f2)
+echo "==> dankmon $ver-$rel"
+
+# `git stash create` snapshots the working tree as a dangling commit, or
+# prints nothing when the tree is clean.
+tree=$(git -C "$PROJ" stash create)
+dirty=1
+[ -n "$tree" ] || { tree=$(git -C "$PROJ" rev-parse HEAD); dirty=0; }
+echo "==> snapshot ${tree:0:12} (dirty=$dirty)"
+
+rm -rf src pkg ./*.pkg.tar* "dankmon-$ver.tar.gz"
+git -C "$PROJ" archive --prefix="dankmon-$ver/" -o "$DIR/dankmon-$ver.tar.gz" "$tree"
+# -d: no dependency install through pacman (that needs root); pacman checks
+# them at install time.
+makepkg -df --nocheck
+
+# The build stays next to its PKGBUILD, like the makepkg scratch dirs.
+built="$DIR/$(basename "$(ls dankmon-"$ver"-"$rel"-*.pkg.tar.zst)")"
+rm -rf src pkg "dankmon-$ver.tar.gz"
+
+if [ -n "$repo_dir" ]; then
+    publish "$built"
+    echo "==> done. Clients: pacman -Syu dankmon"
+else
+    echo "==> done: $built"
+    echo "    install with: pacman -U $built   (or publish with --repo, see the header)"
+fi

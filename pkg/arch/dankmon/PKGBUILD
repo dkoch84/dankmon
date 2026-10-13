@@ -1,0 +1,38 @@
+# Maintainer: Daniel Koch <dan@codecargo.com>
+pkgname=dankmon
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Terminal system monitor: CPU, memory, network, NFS client and disks"
+arch=('x86_64')
+license=('custom')
+depends=('glibc' 'gcc-libs')
+makedepends=('cargo')
+options=('!debug')
+# scripts/release writes this tarball from a snapshot of the working tree.
+source=("dankmon-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "dankmon-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "dankmon-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release
+}
+
+check() {
+    cd "dankmon-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen
+}
+
+package() {
+    cd "dankmon-$pkgver"
+    install -Dm755 target/release/dankmon "$pkgdir/usr/bin/dankmon"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/dankmon/README.md"
+}

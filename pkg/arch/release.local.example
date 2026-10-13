@@ -1,0 +1,3 @@
+# Copy to pkg/arch/release.local (untracked) to publish on every release.
+DANKMON_PACMAN_REPO="/path/to/pacman/repo/x86_64"
+DANKMON_PACMAN_DB="myrepo.db.tar.zst"

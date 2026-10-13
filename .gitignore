@@ -1,1 +1,8 @@
 /target
+# makepkg scratch dirs, source tarballs and built packages
+pkg/arch/*/pkg/
+pkg/arch/*/src/
+pkg/arch/*/*.tar.gz
+pkg/arch/*/*.pkg.tar*
+# Machine-specific release settings (use .example)
+pkg/arch/release.local

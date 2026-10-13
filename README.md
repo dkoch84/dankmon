@@ -1,7 +1,7 @@
 # dankmon
 
-A small terminal system monitor: CPU, memory and swap, network, NFS client
-and disks. No process list.
+A small terminal system monitor: CPU, memory and swap, network, GPUs, NFS
+client and disks, with CPU and GPU temperatures. No process list.
 
 Colours come from your terminal's theme, which dankmon asks for at startup
 (OSC 4, 10 and 11):
@@ -27,6 +27,9 @@ built-in light and dark sets (`--light` / `--dark` start on those).
 
 - **CPU**: one line per logical core over time, with a matching coloured bar per
   core; total busy %, iowait and load average in the title.
+- **CPU temperature** (in the CPU title): the package reading, plus per-chiplet
+  readings on AMD (`k10temp` or `zenpower`) or the per-core range on Intel
+  (`coretemp`). Coloured by distance from the sensor's critical value.
 - **Memory**: a stacked area over time. Used memory fills from the bottom,
   green, then amber above 75% and red above 90%. Reclaimable cache sits on
   top in a pale shade, and free memory is the empty space above. Available,
@@ -35,6 +38,17 @@ built-in light and dark sets (`--light` / `--dark` start on those).
   and tunnels are left out of the sum, since that traffic also crosses a NIC).
   Per-interface rates and totals since boot; virtual interfaces appear only
   while active. Session totals in the title.
+- **GPU** (next to Memory and Network, only when a GPU is found): busy % over
+  time, one line per GPU, then per GPU its clock, VRAM, temperatures, power
+  against its cap and fan speed, as far as the driver reports them.
+  - AMD (`amdgpu`): everything, from sysfs. On an APU the power figure is the
+    whole chip's.
+  - Intel (`i915`, `xe`): "active" is the share of time the GPU is out of its
+    RC6 sleep state, which needs no privileges; the per-engine busy counters
+    need `CAP_PERFMON`. The clock reads `idle` while it sleeps. Discrete cards
+    add temperature, power and fan; Intel does not report VRAM use unprivileged.
+  - Nvidia: through NVML (`libnvidia-ml.so.1`, part of the proprietary driver),
+    loaded at runtime if present. Without it, only what hwmon offers.
 - **NFS client**: from `/proc/self/mountstats`, per mount: bytes moved over the
   wire vs bytes applications read and wrote (and the page-cache hit rate that
   implies), ops/s, average RTT and execution time, READ and WRITE latency,

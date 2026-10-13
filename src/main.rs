@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use theme::{Mode, Theme};
 
 const USAGE: &str = "\
-dankmon: a small system monitor (CPU, memory, network, NFS client, disks)
+dankmon: a small system monitor (CPU, memory, network, GPUs, NFS client, disks)
 
 usage: dankmon [-i SECONDS] [-w SAMPLES] [--light | --dark]
 

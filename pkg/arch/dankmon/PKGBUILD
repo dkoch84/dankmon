@@ -1,6 +1,6 @@
 # Maintainer: Daniel Koch <dan@codecargo.com>
 pkgname=dankmon
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Terminal system monitor: CPU, memory, network, NFS client and disks"
 arch=('x86_64')

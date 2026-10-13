@@ -1,4 +1,4 @@
-use crate::collect::{cpu, disk, mem, net, nfs};
+use crate::collect::{cpu, disk, gpu, mem, net, nfs, temp};
 use crate::history::History;
 use crate::theme::Theme;
 use std::sync::mpsc::Receiver;
@@ -15,6 +15,8 @@ pub struct App {
     pub core_hist: Vec<History>,
     window: usize,
     pub load: String,
+    cpu_sensors: Option<temp::CpuSensors>,
+    pub cpu_temp: Option<temp::CpuTemp>,
 
     pub mem: mem::Mem,
     pub mem_hist: History,
@@ -31,6 +33,10 @@ pub struct App {
     pub mounts: Vec<nfs::Mount>,
     pub nfs_read_hist: History,
     pub nfs_write_hist: History,
+
+    gpus: gpu::Gpus,
+    pub gpu: Vec<gpu::Gpu>,
+    pub gpu_hist: Vec<History>,
 
     disk_rx: Receiver<disk::Snapshot>,
     pub disks: Option<disk::Snapshot>,
@@ -51,6 +57,8 @@ impl App {
             core_hist: Vec::new(),
             window,
             load: String::new(),
+            cpu_sensors: temp::CpuSensors::find(),
+            cpu_temp: None,
             mem: mem::Mem::default(),
             mem_hist: History::new(window),
             cache_hist: History::new(window),
@@ -64,6 +72,9 @@ impl App {
             mounts: Vec::new(),
             nfs_read_hist: History::new(window),
             nfs_write_hist: History::new(window),
+            gpus: gpu::Gpus::find(),
+            gpu: Vec::new(),
+            gpu_hist: Vec::new(),
             disk_rx: disk::spawn(Duration::from_secs(2)),
             disks: None,
             last: Instant::now(),
@@ -74,6 +85,7 @@ impl App {
         app.net.sample(0.0);
         app.nfs.sample(0.0);
         app.mem = mem::read();
+        app.gpu = app.gpus.sample();
         app
     }
 
@@ -97,6 +109,18 @@ impl App {
         self.load = std::fs::read_to_string("/proc/loadavg")
             .map(|l| l.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
             .unwrap_or_default();
+
+        self.cpu_temp = self.cpu_sensors.as_ref().map(temp::CpuSensors::read);
+
+        self.gpu = self.gpus.sample();
+        if self.gpu_hist.len() != self.gpu.len() {
+            self.gpu_hist = (0..self.gpu.len())
+                .map(|_| History::new(self.window))
+                .collect();
+        }
+        for (h, g) in self.gpu_hist.iter_mut().zip(&self.gpu) {
+            h.push(g.busy.unwrap_or(0.0));
+        }
 
         self.mem = mem::read();
         let pct = |used: u64, total: u64| {

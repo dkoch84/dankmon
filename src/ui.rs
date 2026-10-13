@@ -1,5 +1,6 @@
 use crate::app::App;
-use crate::collect::disk;
+use crate::collect::gpu::Gpu;
+use crate::collect::{disk, temp};
 use crate::history::History;
 use crate::theme::Theme;
 use ratatui::Frame;
@@ -278,13 +279,21 @@ pub fn draw(f: &mut Frame, app: &App) {
         Constraint::Fill(1),
     ])
     .areas(f.area());
-    let [mem_area, net_area] = Layout::horizontal([Constraint::Percentage(50); 2]).areas(mid);
+    let [mem_area, net_area, gpu_area] = if app.gpu.is_empty() {
+        let [m, n] = Layout::horizontal([Constraint::Percentage(50); 2]).areas(mid);
+        [m, n, Rect::default()]
+    } else {
+        Layout::horizontal([Constraint::Ratio(1, 3); 3]).areas(mid)
+    };
     let [nfs_area, disk_area] =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(bottom);
 
     draw_cpu(f, app, top);
     draw_mem(f, app, mem_area);
     draw_net(f, app, net_area);
+    if !app.gpu.is_empty() {
+        draw_gpu(f, app, gpu_area);
+    }
     draw_nfs(f, app, nfs_area);
     draw_disks(f, app, disk_area);
 }
@@ -301,6 +310,13 @@ fn draw_cpu(f: &mut Frame, app: &App, area: Rect) {
         key(t.iowait, format!("iowait {:.1}%", last(&app.cpu_iowait))),
         dim(t, format!("   load {}", app.load)),
     ];
+    if let Some(ct) = &app.cpu_temp {
+        if let Some(p) = ct.package {
+            title.push(Span::raw("   "));
+            title.push(temp_span(t, p, ct.crit));
+        }
+        title.extend(temp_parts(t, ct));
+    }
     title.push(dim(
         t,
         format!(
@@ -361,6 +377,37 @@ fn draw_cpu(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), legend_area);
 }
 
+/// Colour a temperature by how close it is to the sensor's critical value.
+fn temp_span(t: &Theme, c: f64, crit: f64) -> Span<'static> {
+    let color = if c >= crit - 5.0 {
+        t.crit
+    } else if c >= crit - 15.0 {
+        t.warn
+    } else {
+        t.ok
+    };
+    Span::styled(format!("{c:.0}°C"), Style::new().fg(color))
+}
+
+/// Per-chiplet readings in full (there are one or two), per-core ones as a range.
+fn temp_parts(t: &Theme, ct: &temp::CpuTemp) -> Vec<Span<'static>> {
+    if ct.parts.is_empty() {
+        return Vec::new();
+    }
+    let list = if ct.parts.len() <= 4 {
+        ct.parts
+            .iter()
+            .map(|c| format!("{c:.0}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        let lo = ct.parts.iter().copied().fold(f64::MAX, f64::min);
+        let hi = ct.parts.iter().copied().fold(f64::MIN, f64::max);
+        format!("{lo:.0}-{hi:.0}")
+    };
+    vec![dim(t, format!("  {} {list}°", ct.part_kind))]
+}
+
 fn draw_mem(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let m = &app.mem;
@@ -410,13 +457,19 @@ fn draw_mem(f: &mut Frame, app: &App, area: Rect) {
     ];
     if m.swap_total > 0 {
         let pct = m.swap_used() as f64 * 100.0 / m.swap_total as f64;
-        spans.push(dim(t, "   swap "));
-        spans.extend(bar(t, pct, 12, t.level(pct)));
-        spans.push(Span::raw(format!(
+        let text = format!(
             " {pct:.0}%  {} / {}",
             human(m.swap_used() as f64),
             human(m.swap_total as f64)
-        )));
+        );
+        // The bar takes whatever the text leaves, up to 12 cells.
+        let used = Line::from(spans.clone()).width() + 8 + text.chars().count();
+        let bar_w = (info.width as usize).saturating_sub(used).min(12);
+        spans.push(dim(t, "   swap "));
+        if bar_w >= 3 {
+            spans.extend(bar(t, pct, bar_w, t.level(pct)));
+        }
+        spans.push(Span::raw(text));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), info);
 }
@@ -501,6 +554,116 @@ fn draw_net(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Fill(1),
     ];
     f.render_widget(Table::new(rows, widths), list);
+}
+
+fn draw_gpu(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    let mut title = vec![heading(t, if app.gpu.len() > 1 { "GPUs" } else { "GPU" })];
+    for (i, g) in app.gpu.iter().enumerate() {
+        if let Some(b) = g.busy {
+            let label = if app.gpu.len() > 1 {
+                format!("{} {b:.0}%", g.name)
+            } else {
+                format!("{b:.0}%")
+            };
+            title.push(key(t.core(i), label));
+        }
+    }
+    let block = panel(t, title);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Up to three lines per GPU under the graph, as many GPUs as leave the
+    // graph at least four rows.
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, g) in app.gpu.iter().enumerate() {
+        let mut block = gpu_lines(t, g, t.core(i), inner.width as usize);
+        if lines.len() + block.len() + 4 > inner.height as usize {
+            break;
+        }
+        lines.append(&mut block);
+    }
+    let [chart_area, list] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(lines.len() as u16)])
+            .areas(inner);
+
+    let points: Vec<_> = app.gpu_hist.iter().map(History::points).collect();
+    let series: Vec<Series> = points
+        .iter()
+        .zip(&app.gpu)
+        .enumerate()
+        .filter(|(_, (_, g))| g.busy.is_some())
+        .map(|(i, (p, _))| (p.as_slice(), t.core(i)))
+        .collect();
+    if let Some(h) = app.gpu_hist.first() {
+        graph(
+            f,
+            t,
+            chart_area,
+            &series,
+            h.cap(),
+            100.0,
+            &pct_labels(chart_area.height),
+        );
+    }
+    f.render_widget(Paragraph::new(lines), list);
+}
+
+fn gpu_lines(t: &Theme, g: &Gpu, color: Color, width: usize) -> Vec<Line<'static>> {
+    let mut head = vec![Span::styled(
+        g.name.clone(),
+        Style::new().fg(color).add_modifier(Modifier::BOLD),
+    )];
+    head.push(dim(t, format!("  {}", g.driver)));
+    if let Some(b) = g.busy {
+        head.push(dim(t, if g.busy_is_awake { "  active " } else { "  busy " }));
+        head.push(Span::raw(format!("{b:.0}%")));
+    }
+    if let Some(c) = g.clock_mhz {
+        head.push(dim(t, "  clock "));
+        // Intel reports 0 while the GPU sleeps in RC6.
+        head.push(Span::raw(if c > 0.0 {
+            format!("{c:.0}MHz")
+        } else {
+            "idle".into()
+        }));
+    }
+    let mut out = vec![Line::from(head)];
+
+    if let Some((used, total)) = g.vram.filter(|v| v.1 > 0) {
+        let pct = used as f64 * 100.0 / total as f64;
+        let mut spans = vec![dim(t, "  vram ")];
+        spans.extend(bar(t, pct, width.saturating_sub(30).clamp(6, 24), t.level(pct)));
+        spans.push(Span::raw(format!(
+            " {pct:.0}%  {} / {}",
+            human(used as f64),
+            human(total as f64)
+        )));
+        out.push(Line::from(spans));
+    }
+
+    let mut sensors = vec![Span::raw("  ")];
+    for (label, c, crit) in &g.temps {
+        sensors.push(dim(t, format!("{label} ")));
+        sensors.push(temp_span(t, *c, *crit));
+        sensors.push(Span::raw("  "));
+    }
+    if let Some(w) = g.power_w {
+        sensors.push(dim(t, "power "));
+        sensors.push(Span::raw(match g.power_cap_w {
+            Some(cap) => format!("{w:.0}/{cap:.0}W"),
+            None => format!("{w:.0}W"),
+        }));
+        sensors.push(Span::raw("  "));
+    }
+    if let Some(fan) = &g.fan {
+        sensors.push(dim(t, "fan "));
+        sensors.push(Span::raw(fan.clone()));
+    }
+    if sensors.len() > 1 {
+        out.push(Line::from(sensors));
+    }
+    out
 }
 
 fn ms(v: Option<f64>) -> String {
